@@ -1,4 +1,4 @@
-# XEX Plus — Architecture Document
+# Klub — Architecture Document
 
 ## Table of Contents
 
@@ -20,7 +20,7 @@
 
 ## 1. System Overview
 
-XEX Plus is a team-based fantasy investment game for the FIFA World Cup. Players invest in national teams using a virtual budget, earn points from match results and tournament progression, and compete on a global leaderboard.
+Klub is a team-based fantasy investment game for the FIFA World Cup. Players invest in national teams using a virtual budget, earn points from match results and tournament progression, and compete on a global leaderboard.
 
 ### Core Domain Concepts
 - **Portfolio**: A player's collection of teams (exactly 4 in group stage, reducing in knockout rounds)
@@ -92,7 +92,7 @@ XEX Plus is a team-based fantasy investment game for the FIFA World Cup. Players
 ### Design Principles
 1. **Same stack as XEX Play**: Go + Flutter + Next.js + PostgreSQL + Redis
 2. **Shared JWT with XEX Exchange**: No separate auth system
-3. **Database isolation**: XEX Plus has its own database, separate from Exchange and Play
+3. **Database isolation**: Klub has its own database, separate from Exchange and Play
 4. **Cache-first for hot paths**: Leaderboards, team prices, and market state cached in Redis
 5. **Real-time via WebSocket**: Live price updates, match events, leaderboard changes
 6. **Clean layering**: Handler → Service → Repository (no shortcuts)
@@ -104,7 +104,7 @@ XEX Plus is a team-based fantasy investment game for the FIFA World Cup. Players
 
 ## 3. Backend Architecture
 
-### Module: `github.com/xex-exchange/xexplus-api`
+### Module: `github.com/xex-exchange/klub-api`
 
 ### Directory Layout
 ```
@@ -727,7 +727,7 @@ All API responses follow a consistent format:
 ```json
 {
   "@@locale": "en",
-  "appTitle": "XEX Plus",
+  "appTitle": "Klub",
   "buyTeam": "Buy Team",
   "sellTeam": "Sell Team",
   "portfolioTitle": "My Portfolio",
@@ -992,7 +992,7 @@ Same hub pattern as XEX Play: server maintains `userID → []*Client` connection
 Same approach as XEX Play — no separate auth system.
 
 ```
-User → XEX Exchange Login → JWT (HS256) → XEX Plus API validates with shared secret
+User → XEX Exchange Login → JWT (HS256) → Klub API validates with shared secret
 ```
 
 #### JWT Claims
@@ -1009,8 +1009,8 @@ User → XEX Exchange Login → JWT (HS256) → XEX Plus API validates with shar
 #### Flow
 1. User logs in via XEX Exchange (magic link, Google, Apple, passkey)
 2. Exchange issues JWT
-3. User opens XEX Plus app with JWT
-4. XEX Plus API validates JWT using shared `JWT_SECRET`
+3. User opens Klub app with JWT
+4. Klub API validates JWT using shared `JWT_SECRET`
 5. On first login, creates local `users` record linked by `xex_user_id`
 
 #### Middleware Stack
@@ -1251,9 +1251,9 @@ services:
     image: postgres:17-alpine
     ports: ["5432:5432"]
     environment:
-      POSTGRES_DB: xexplus
-      POSTGRES_USER: xexplus
-      POSTGRES_PASSWORD: xexplus
+      POSTGRES_DB: klub
+      POSTGRES_USER: klub
+      POSTGRES_PASSWORD: klub
 
   redis:
     image: redis:7-alpine
@@ -1281,8 +1281,8 @@ GitHub Actions (CI/CD)
 | Resource | Details |
 |----------|---------|
 | Container Registry | Azure Container Registry (ACR) |
-| Backend | Azure Container App: `xexplus-api` |
-| Admin | Azure Container App: `xexplus-admin` |
+| Backend | Azure Container App: `klub-api` |
+| Admin | Azure Container App: `klub-admin` |
 | Database | Azure Database for PostgreSQL (Flexible Server) |
 | Cache | Azure Cache for Redis |
 | Resource Group | `xex-production-rg` (shared with other XEX services) |
@@ -1296,7 +1296,7 @@ GitHub Actions (CI/CD)
 PORT=8080
 ENVIRONMENT=development|production
 LOG_LEVEL=debug|info|warn|error
-DATABASE_URL=postgres://xexplus:xexplus@localhost:5432/xexplus?sslmode=disable
+DATABASE_URL=postgres://klub:klub@localhost:5432/klub?sslmode=disable
 REDIS_URL=redis://localhost:6379
 JWT_SECRET=shared-with-exchange-min-32-chars
 CORS_ORIGINS=http://localhost:3000
@@ -1339,12 +1339,12 @@ GET /health → { "status": "ok", "db": "ok", "redis": "ok" }
 ```
 
 ### Prometheus Metrics
-- `xexplus_http_requests_total` — Request count by method, path, status
-- `xexplus_http_request_duration_seconds` — Request latency histogram
-- `xexplus_active_websocket_connections` — Current WS connections
-- `xexplus_trades_total` — Buy/sell transactions
-- `xexplus_active_portfolios` — Portfolios in current tournament
-- `xexplus_match_results_processed` — Match results processed
+- `klub_http_requests_total` — Request count by method, path, status
+- `klub_http_request_duration_seconds` — Request latency histogram
+- `klub_active_websocket_connections` — Current WS connections
+- `klub_trades_total` — Buy/sell transactions
+- `klub_active_portfolios` — Portfolios in current tournament
+- `klub_match_results_processed` — Match results processed
 
 ### Structured Logging (zerolog)
 All logs are JSON-formatted with request ID, user ID, and duration fields for easy querying in production.

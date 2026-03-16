@@ -1,8 +1,8 @@
-# XEX Plus — Team Fantasy for World Cup
+# Klub — Team Fantasy for World Cup
 
-A team-based fantasy investment game for the FIFA World Cup. Unlike traditional fantasy games based on individual player performance, XEX Plus lets users **invest in national teams** using a stock-market-style portfolio system. Players manage a budget, buy and sell teams at dynamic prices, and earn points from their teams' real match results and tournament progression.
+A team-based fantasy investment game for the FIFA World Cup. Unlike traditional fantasy games based on individual player performance, Klub lets users **invest in national teams** using a stock-market-style portfolio system. Players manage a budget, buy and sell teams at dynamic prices, and earn points from their teams' real match results and tournament progression.
 
-XEX Plus is designed to acquire and engage users for the [XEX Exchange](https://xex.to) platform.
+Klub is designed to acquire and engage users for the [XEX Exchange](https://xex.to) platform.
 
 ---
 
@@ -120,7 +120,7 @@ When players are tied on points at tournament end:
 
 ## Tech Stack
 
-XEX Plus follows the same architecture and technology choices as [XEX Play](https://github.com/xex-exchange/xexplay-api):
+Klub follows the same architecture and technology choices as [XEX Play](https://github.com/xex-exchange/xexplay-api):
 
 | Component | Technology | Version |
 |-----------|-----------|---------|
@@ -155,7 +155,7 @@ XEX Plus follows the same architecture and technology choices as [XEX Play](http
 
 ### Automation & AI
 
-XEX Plus uses AI and automation to reduce manual admin work:
+Klub uses AI and automation to reduce manual admin work:
 
 | Feature | Provider | Trigger |
 |---------|----------|---------|
@@ -176,7 +176,7 @@ All automation jobs are logged in the `automation_logs` table and visible in the
 ## Project Structure
 
 ```
-xexplus/
+klub/
 ├── backend/                    # Go API server
 │   ├── cmd/server/            # Entry point
 │   ├── internal/
