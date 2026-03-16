@@ -4,6 +4,8 @@ A team-based fantasy investment game for the FIFA World Cup. Unlike traditional 
 
 Klub is designed to acquire and engage users for the [XEX Exchange](https://xex.to) platform.
 
+For the full technical design, database schema, API specifications, and game engine details, see the [Architecture Document](ARCHITECTURE.md).
+
 ---
 
 ## Game Overview
