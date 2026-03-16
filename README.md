@@ -147,9 +147,29 @@ XEX Plus follows the same architecture and technology choices as [XEX Play](http
 | Service | Purpose |
 |---------|---------|
 | **XEX Exchange API** | Shared JWT auth, reward distribution, user accounts |
-| **Sports Data API** | Live match results, scores, tournament brackets (e.g., The Odds API or football-data.org) |
+| **[The Odds API](https://dash.the-odds-api.com/)** | Live match results, scores, odds data, tournament brackets (same account as XEX Play) |
+| **[Anthropic Claude API](https://console.anthropic.com/)** | AI-powered automation: team tier suggestions, team name translations, match previews, notification content (same account as XEX Play, Claude Haiku 4.5) |
 | **Firebase** | Push notifications, analytics, crash reporting |
-| **Anthropic Claude** | Content generation (team descriptions, match previews) |
+
+> **Note on API Keys**: All third-party API keys (Anthropic, The Odds API, Exchange service key, FCM credentials) are stored in the **database `settings` table** and managed through the **admin panel Settings page** — NOT in environment variables. This follows the same pattern as XEX Play, allowing runtime key rotation without redeployment. Only infrastructure secrets (`DATABASE_URL`, `REDIS_URL`, `JWT_SECRET`) remain as env vars.
+
+### Automation & AI
+
+XEX Plus uses AI and automation to reduce manual admin work:
+
+| Feature | Provider | Trigger |
+|---------|----------|---------|
+| **Match data ingestion** | The Odds API | Cron: every 6 hours — fetches upcoming World Cup matches, scores, and odds |
+| **Team tier suggestions** | Claude Haiku 4.5 | On tournament setup — suggests S/A/B/C tier + initial pricing based on current odds |
+| **Team name translations** | Claude Haiku 4.5 | On team creation — auto-translates team names to all supported languages (en, fa, ar, tr, es, fr) |
+| **Match previews** | Claude Haiku 4.5 | Before each gameweek — generates localized match preview content for the app |
+| **Notification content** | Claude Haiku 4.5 | On match result — generates localized push notification text (e.g., "Your team Brazil won! +6 points") |
+| **Live score polling** | The Odds API | Cron: every 60s during live matches — polls for real-time score updates |
+| **Auto price updates** | Internal | On match result — automatically calculates and applies price changes |
+| **Auto scoring** | Internal | On match result — automatically calculates points for all affected portfolios |
+| **Market lock/unlock** | Internal | Cron — auto-locks market 5 min before kickoff, unlocks after all concurrent matches finish |
+
+All automation jobs are logged in the `automation_logs` table and visible in the admin panel's Automation dashboard.
 
 ---
 
@@ -170,8 +190,11 @@ xexplus/
 │   │   │   ├── postgres/      # PostgreSQL repos
 │   │   │   └── redis/         # Redis caching
 │   │   ├── service/           # Business logic
+│   │   │   ├── ai_service.go  # Claude Haiku AI (translations, previews, tier suggestions)
+│   │   │   └── ...
 │   │   ├── exchange/          # XEX Exchange client
 │   │   ├── external/          # Third-party API clients
+│   │   │   └── oddsapi/       # The Odds API wrapper
 │   │   └── pkg/               # Utilities
 │   ├── migrations/            # Database migrations
 │   ├── docker/                # Docker configs
@@ -179,7 +202,7 @@ xexplus/
 │
 ├── app/                       # Flutter mobile app
 │   ├── lib/
-│   │   ├── core/              # Infrastructure (network, auth, routing, theme, l10n)
+│   │   ├── core/              # Infrastructure (network, auth, routing, theme, l10n/i18n)
 │   │   ├── features/          # Feature modules
 │   │   │   ├── auth/          # Login via XEX Exchange
 │   │   │   ├── portfolio/     # Team portfolio management
@@ -202,7 +225,9 @@ xexplus/
 │   │       ├── users/         # User management
 │   │       ├── leaderboard/   # Leaderboard management
 │   │       ├── rewards/       # Prize pool & distribution
-│   │       └── settings/      # Configuration
+│   │       ├── automation/    # AI & data automation dashboard (jobs, logs)
+│   │       ├── translations/  # Translation management
+│   │       └── settings/      # API keys (Anthropic, Odds API, FCM, Exchange) stored in DB
 │   └── package.json
 │
 ├── docs/                      # Documentation
@@ -238,12 +263,50 @@ cd admin && npm install && npm run dev
 ```
 
 ### Environment Variables
-See `backend/.env.example` for backend configuration. Key variables:
+See `backend/.env.example` for backend configuration.
+
+**Infrastructure (env vars only):**
 - `DATABASE_URL` — PostgreSQL connection string
 - `REDIS_URL` — Redis connection string
 - `JWT_SECRET` — Shared secret with XEX Exchange (min 32 chars)
+- `CORS_ORIGINS` — Allowed CORS origins
+
+**Service keys (stored in DB `settings` table, managed via admin panel):**
+- `ANTHROPIC_API_KEY` — Claude API key (same account as XEX Play)
+- `ODDS_API_KEY` — The Odds API key (same account as XEX Play)
 - `EXCHANGE_API_URL` — XEX Exchange API endpoint
-- `SPORTS_DATA_API_KEY` — Sports data provider API key
+- `EXCHANGE_SERVICE_KEY` — Service-to-service auth key
+- `FCM_CREDENTIALS_JSON` — Firebase service account JSON
+
+### Internationalization (i18n)
+
+The Flutter app is built **i18n-first** — every user-facing string uses Flutter's `intl` + ARB localization from day one. No hardcoded strings are allowed.
+
+**Supported languages:** English (en), Persian (fa), Arabic (ar), Turkish (tr), Spanish (es), French (fr)
+
+**Approach:**
+- **Flutter app**: All UI text uses `AppLocalizations.of(context).keyName` via ARB files (`app_en.arb`, `app_fa.arb`, etc.). Every screen, widget, button label, error message, and placeholder is a localization key from the start.
+- **Backend data**: All user-facing data (tournament names, stage names, team names, gameweek names) is stored as JSONB with per-language values: `{"en": "Brazil", "fa": "برزیل", "ar": "البرازيل"}`.
+- **API responses**: Backend returns the full JSONB object; the app picks the right language based on user preference.
+- **AI translations**: Claude Haiku auto-generates translations for team names and content when created via admin panel.
+- **RTL support**: Persian (fa) and Arabic (ar) require right-to-left layout — the app includes RTL support from the start via Flutter's built-in `Directionality` handling.
+
+```
+app/lib/core/l10n/
+├── l10n.yaml                  # flutter_localizations config
+├── arb/
+│   ├── app_en.arb             # English (base)
+│   ├── app_fa.arb             # Persian
+│   ├── app_ar.arb             # Arabic
+│   ├── app_tr.arb             # Turkish
+│   ├── app_es.arb             # Spanish
+│   └── app_fr.arb             # French
+```
+
+**Rule**: During development, when adding ANY user-facing text, the developer must:
+1. Add the key + English value to `app_en.arb`
+2. Use `AppLocalizations.of(context).keyName` in the widget
+3. Never use raw strings like `Text('Buy Team')` — always `Text(context.l10n.buyTeam)`
 
 ---
 

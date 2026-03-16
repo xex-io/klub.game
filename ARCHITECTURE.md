@@ -12,7 +12,7 @@
 8. [Real-Time System](#8-real-time-system)
 9. [Authentication & Authorization](#9-authentication--authorization)
 10. [Game Engine](#10-game-engine)
-11. [Sports Data Pipeline](#11-sports-data-pipeline)
+11. [Sports Data Pipeline & AI Automation](#11-sports-data-pipeline--ai-automation)
 12. [Deployment & Infrastructure](#12-deployment--infrastructure)
 13. [Monitoring & Observability](#13-monitoring--observability)
 
@@ -96,6 +96,9 @@ XEX Plus is a team-based fantasy investment game for the FIFA World Cup. Players
 4. **Cache-first for hot paths**: Leaderboards, team prices, and market state cached in Redis
 5. **Real-time via WebSocket**: Live price updates, match events, leaderboard changes
 6. **Clean layering**: Handler → Service → Repository (no shortcuts)
+7. **API keys in DB, not env**: All third-party API keys (Anthropic, Odds API, FCM, Exchange service key) stored in `settings` table and managed via admin panel — same pattern as XEX Play. Only infra secrets (DATABASE_URL, REDIS_URL, JWT_SECRET) are env vars.
+8. **i18n from day one**: Every user-facing string in Flutter uses ARB localization keys. All backend user-facing data uses JSONB with per-language values. No hardcoded strings — ever.
+9. **AI-assisted automation**: Claude Haiku 4.5 (same account as XEX Play) for translations, tier suggestions, match previews, notification content. The Odds API (same account) for match data and live scores.
 
 ---
 
@@ -109,7 +112,8 @@ backend/
 ├── cmd/server/main.go              # Entry point, DI wiring
 ├── internal/
 │   ├── config/
-│   │   └── config.go               # Env-based configuration
+│   │   ├── config.go               # Env-based configuration (infra only)
+│   │   └── settings.go             # DB-backed settings loader (API keys, feature flags)
 │   ├── domain/                     # Domain models (pure structs, no DB deps)
 │   │   ├── user.go
 │   │   ├── team.go
@@ -131,7 +135,9 @@ backend/
 │   │   │   ├── team_handler.go
 │   │   │   ├── match_handler.go
 │   │   │   ├── user_handler.go
-│   │   │   └── settings_handler.go
+│   │   │   ├── settings_handler.go      # DB-backed settings CRUD (API keys, flags)
+│   │   │   ├── automation_handler.go    # Job triggers, logs viewer
+│   │   │   └── translation_handler.go   # JSONB translation CRUD, AI batch translate
 │   │   └── ws/
 │   │       └── ws_handler.go
 │   ├── middleware/
@@ -153,7 +159,10 @@ backend/
 │   │   ├── match_service.go        # Match result processing
 │   │   ├── notification_service.go # Push notifications
 │   │   ├── cron_service.go         # Background scheduled jobs
-│   │   ├── sports_data_service.go  # External match data ingestion
+│   │   ├── sports_data_service.go  # The Odds API integration (match data, live scores)
+│   │   ├── ai_service.go           # Claude Haiku 4.5 (translations, tier suggestions, previews)
+│   │   ├── ai_prompts.go           # Prompt templates for Claude API calls
+│   │   ├── settings_service.go     # DB-backed settings CRUD (API keys, feature flags)
 │   │   └── reset_service.go        # Portfolio reset logic
 │   ├── repository/
 │   │   ├── postgres/
@@ -172,8 +181,10 @@ backend/
 │   ├── exchange/
 │   │   └── client.go               # XEX Exchange API client
 │   ├── external/
-│   │   └── sportsdata/
-│   │       └── client.go           # Sports data API wrapper
+│   │   ├── oddsapi/
+│   │   │   └── client.go           # The Odds API wrapper (dash.the-odds-api.com)
+│   │   └── anthropic/
+│   │       └── client.go           # Anthropic Claude API client (Haiku 4.5)
 │   └── pkg/
 │       ├── ws/hub.go               # WebSocket hub
 │       ├── jwt/jwt.go              # JWT parsing
@@ -495,14 +506,52 @@ CREATE TABLE fcm_tokens (
 ```
 
 #### `settings`
+Stores all third-party API keys and feature flags. Managed via the admin panel Settings page — **not environment variables**. This allows runtime key rotation without redeployment (same pattern as XEX Play).
+
 ```sql
 CREATE TABLE settings (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    key             VARCHAR(100) UNIQUE NOT NULL,
+    key             VARCHAR(100) UNIQUE NOT NULL,  -- e.g. ANTHROPIC_API_KEY, ODDS_API_KEY,
+                                                   -- EXCHANGE_SERVICE_KEY, FCM_CREDENTIALS_JSON,
+                                                   -- AUTO_SPORTS_ENABLED, AI_TRANSLATIONS_ENABLED
     value           TEXT NOT NULL,
-    is_secret       BOOLEAN DEFAULT false,
+    description     TEXT,                          -- human-readable description for admin UI
+    is_secret       BOOLEAN DEFAULT false,         -- masked in admin UI when true
     updated_at      TIMESTAMPTZ DEFAULT NOW()
 );
+```
+
+**Pre-seeded settings keys:**
+| Key | Description | Secret? |
+|-----|-------------|---------|
+| `ANTHROPIC_API_KEY` | Claude API key (same account as XEX Play) | Yes |
+| `ODDS_API_KEY` | The Odds API key (same account as XEX Play) | Yes |
+| `EXCHANGE_API_URL` | XEX Exchange base URL | No |
+| `EXCHANGE_SERVICE_KEY` | Service-to-service auth key | Yes |
+| `FCM_CREDENTIALS_JSON` | Firebase service account JSON | Yes |
+| `AUTO_SPORTS_ENABLED` | Enable auto match data fetching | No |
+| `AI_TRANSLATIONS_ENABLED` | Enable AI-powered translations | No |
+| `AI_TIER_SUGGESTIONS_ENABLED` | Enable AI-powered tier suggestions | No |
+| `LIVE_SCORE_POLL_INTERVAL` | Live score polling interval in seconds | No |
+
+#### `automation_logs`
+Tracks all automation and AI job executions for visibility in the admin panel.
+
+```sql
+CREATE TABLE automation_logs (
+    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    job_name        VARCHAR(100) NOT NULL,       -- fetch_matches, translate_teams,
+                                                 -- suggest_tiers, generate_previews,
+                                                 -- poll_live_scores, process_result
+    status          VARCHAR(20) NOT NULL,         -- running, completed, failed
+    source          VARCHAR(20) DEFAULT 'auto',   -- auto | manual (triggered from admin)
+    input_data      JSONB,                        -- job parameters
+    output_data     JSONB,                        -- job results summary
+    error_message   TEXT,
+    started_at      TIMESTAMPTZ DEFAULT NOW(),
+    completed_at    TIMESTAMPTZ
+);
+CREATE INDEX idx_automation_logs_job ON automation_logs(job_name, started_at DESC);
 ```
 
 ### Key Indexes
@@ -625,9 +674,19 @@ All API responses follow a consistent format:
 | GET | `/v1/admin/users/:id` | User detail with portfolio |
 | **Leaderboard** | | |
 | POST | `/v1/admin/leaderboard/recalculate` | Force leaderboard recalculation |
-| **Settings** | | |
-| GET | `/v1/admin/settings` | List settings |
-| PUT | `/v1/admin/settings/:key` | Update setting |
+| **Settings (DB-backed)** | | |
+| GET | `/v1/admin/settings` | List all settings (secrets masked) |
+| PUT | `/v1/admin/settings/:key` | Update setting value (API keys, feature flags) |
+| **Automation** | | |
+| GET | `/v1/admin/automation/logs` | List automation job logs (paginated, filterable) |
+| POST | `/v1/admin/automation/fetch-matches` | Manually trigger match data fetch from Odds API |
+| POST | `/v1/admin/automation/translate` | Manually trigger AI translation for entities |
+| POST | `/v1/admin/automation/suggest-tiers` | AI-suggest team tiers based on current odds |
+| POST | `/v1/admin/automation/generate-previews` | AI-generate match previews for gameweek |
+| **Translations** | | |
+| GET | `/v1/admin/translations/:entity/:id` | Get all translations for an entity (team, stage, etc.) |
+| PUT | `/v1/admin/translations/:entity/:id` | Update translations for an entity |
+| POST | `/v1/admin/translations/ai-batch` | AI-translate all missing languages for a set of entities |
 | **Dashboard** | | |
 | GET | `/v1/admin/dashboard/stats` | Overview statistics |
 
@@ -637,23 +696,84 @@ All API responses follow a consistent format:
 
 ### Flutter App Structure (Riverpod + GoRouter)
 
+### i18n-First Architecture
+
+**Every user-facing string in the app MUST use Flutter's `intl` localization from the start.** This is a non-negotiable development rule — no hardcoded strings, ever.
+
+#### Setup
+- Uses `flutter_localizations` + `intl` package with ARB files
+- `l10n.yaml` configured at project root for code generation
+- All 6 languages have ARB files from day one, even if initially only English has values (others filled by AI translation)
+
+#### Supported Languages
+| Code | Language | Direction |
+|------|----------|-----------|
+| `en` | English | LTR |
+| `fa` | Persian (Farsi) | **RTL** |
+| `ar` | Arabic | **RTL** |
+| `tr` | Turkish | LTR |
+| `es` | Spanish | LTR |
+| `fr` | French | LTR |
+
+#### Development Rules
+1. **Never** use raw strings: `Text('Buy Team')` — always `Text(context.l10n.buyTeam)`
+2. Add every new string to `app_en.arb` with a descriptive key
+3. Use ICU message format for plurals and interpolation: `"{count} teams remaining"` → `{count, plural, one{1 team remaining} other{{count} teams remaining}}`
+4. Create a `context.l10n` extension getter for clean access: `extension L10nX on BuildContext { AppLocalizations get l10n => AppLocalizations.of(this)!; }`
+5. RTL is handled automatically by Flutter's `Directionality` widget — but use `EdgeInsetsDirectional` instead of `EdgeInsets`, `TextDirection`-aware icons, and `start`/`end` instead of `left`/`right`
+6. Backend JSONB data (team names, stage names) is resolved client-side: `team.name[userLocale] ?? team.name['en']`
+
+#### ARB File Example (`app_en.arb`)
+```json
+{
+  "@@locale": "en",
+  "appTitle": "XEX Plus",
+  "buyTeam": "Buy Team",
+  "sellTeam": "Sell Team",
+  "portfolioTitle": "My Portfolio",
+  "budgetRemaining": "{amount} Credits remaining",
+  "@budgetRemaining": { "placeholders": { "amount": { "type": "double", "format": "decimalPattern" } } },
+  "teamEliminated": "{teamName} has been eliminated",
+  "@teamEliminated": { "placeholders": { "teamName": { "type": "String" } } },
+  "tradesRemaining": "{count, plural, one{1 trade remaining} other{{count} trades remaining}}",
+  "@tradesRemaining": { "placeholders": { "count": { "type": "int" } } },
+  "confirmBuy": "Buy {teamName} for {price} Credits?",
+  "@confirmBuy": { "placeholders": { "teamName": { "type": "String" }, "price": { "type": "double" } } },
+  "marketLocked": "Market is locked during live matches",
+  "resetWarning": "This will sell all your teams at 95% value. You have {remaining} resets left.",
+  "@resetWarning": { "placeholders": { "remaining": { "type": "int" } } },
+  "pointsEarned": "+{points} points from {teamName}",
+  "@pointsEarned": { "placeholders": { "points": { "type": "double" }, "teamName": { "type": "String" } } },
+  "leaderboardRank": "Rank #{rank}",
+  "@leaderboardRank": { "placeholders": { "rank": { "type": "int" } } }
+}
+```
+
 ```
 app/lib/
 ├── main.dart                       # Entry point, Firebase init
-├── app.dart                        # MaterialApp setup
+├── app.dart                        # MaterialApp setup (with localizationsDelegates)
 ├── core/
 │   ├── config/
 │   │   └── env_config.dart         # API URL, environment
 │   ├── network/
 │   │   ├── api_client.dart         # Dio HTTP client
-│   │   └── interceptors.dart       # Auth token, error handling
+│   │   └── interceptors.dart       # Auth token, error handling, locale header
 │   ├── routing/
 │   │   └── router.dart             # GoRouter routes
 │   ├── storage/
 │   │   └── secure_storage.dart     # JWT token storage
 │   ├── theme/
-│   │   └── app_theme.dart          # Dark-first design system
-│   ├── l10n/                       # Localization (en, fa, ar, tr, es, fr)
+│   │   └── app_theme.dart          # Dark-first design system (RTL-aware)
+│   ├── l10n/
+│   │   ├── l10n.yaml              # flutter_localizations config
+│   │   ├── app_en.arb             # English (base locale)
+│   │   ├── app_fa.arb             # Persian
+│   │   ├── app_ar.arb             # Arabic
+│   │   ├── app_tr.arb             # Turkish
+│   │   ├── app_es.arb             # Spanish
+│   │   ├── app_fr.arb             # French
+│   │   └── l10n_extension.dart    # context.l10n extension getter
 │   ├── providers/
 │   │   ├── auth_provider.dart      # Auth state
 │   │   ├── tournament_provider.dart
@@ -753,7 +873,9 @@ admin/src/
 │   │   │   └── [id]/page.tsx       # User portfolio detail
 │   │   ├── leaderboard/page.tsx    # Leaderboard view
 │   │   ├── rewards/page.tsx        # Prize pool management
-│   │   └── settings/page.tsx       # Configuration
+│   │   ├── automation/page.tsx     # AI & data automation dashboard
+│   │   ├── translations/page.tsx   # Translation management (view/edit per language)
+│   │   └── settings/page.tsx       # API keys & feature flags (DB-backed)
 │   └── globals.css
 ├── components/                     # Reusable shadcn/ui components
 ├── lib/
@@ -765,12 +887,14 @@ admin/src/
 
 ### Admin Capabilities
 - **Tournament setup**: Create tournament, define stages, configure multipliers and pricing
-- **Team management**: Add teams, set tiers/prices, mark eliminations
+- **Team management**: Add teams, set tiers/prices, mark eliminations; AI-suggested tiers based on odds
 - **Match management**: Schedule matches, submit results (triggers auto-scoring and price updates)
 - **Market control**: Lock/unlock market during matches
 - **User oversight**: View any user's portfolio, transaction history
 - **Leaderboard**: View rankings, force recalculation
-- **Settings**: API keys, feature flags, notification templates
+- **Automation dashboard**: View job status/logs, manually trigger AI/data jobs (fetch matches, translate teams, generate previews), source badges (Auto/Manual)
+- **Translation management**: View and edit all JSONB translations per entity (teams, stages, tournaments), trigger AI batch translation for missing languages
+- **Settings (DB-backed)**: API keys for Anthropic Claude, The Odds API, Exchange, FCM — stored in `settings` table, secret values masked in UI. Feature flags for automation toggles. **No redeployment needed to change keys.**
 
 ---
 
@@ -1027,31 +1151,89 @@ User requests RESET
 
 ---
 
-## 11. Sports Data Pipeline
+## 11. Sports Data Pipeline & AI Automation
 
-### Data Flow
+### External Services (Same Accounts as XEX Play)
+
+| Service | Dashboard | Purpose | API Key Storage |
+|---------|-----------|---------|-----------------|
+| **The Odds API** | [dash.the-odds-api.com](https://dash.the-odds-api.com/) | Match data, live scores, odds for tier suggestions | DB `settings` table: `ODDS_API_KEY` |
+| **Anthropic Claude** | [console.anthropic.com](https://console.anthropic.com/) | Translations, tier suggestions, match previews, notification text | DB `settings` table: `ANTHROPIC_API_KEY` |
+
+> **Important**: These use the same API accounts/keys as XEX Play. Keys are entered once in the admin panel Settings page and stored in the database — not in environment variables.
+
+### Sports Data Flow (The Odds API)
 
 ```
-Sports Data API (e.g., football-data.org / The Odds API)
+The Odds API (dash.the-odds-api.com)
        │
-       ▼
-CronService (every 6 hours)
+       ├─── CronService: every 6 hours ──→ Fetch upcoming matches, odds, brackets
+       │                                    Create/update match records in DB
        │
-       ▼
-1. Fetch upcoming matches
-2. Create/update match records
-3. Fetch live scores during matches
-4. Admin confirms final results (or auto-confirm from API)
+       ├─── CronService: every 60s ──────→ Poll live scores during active matches
+       │    (only when matches are live)     Broadcast via WebSocket
        │
-       ▼
-Match result processing pipeline (Section 10)
+       └─── On match completion ─────────→ Fetch final result
+                                            Admin confirms OR auto-accepts
+                                            │
+                                            ▼
+                                     Match result processing pipeline (Section 10)
 ```
 
-### Automation Scope
-- **Match scheduling**: Auto-fetch tournament bracket and match schedule
-- **Live scores**: Poll during matches for real-time score updates
-- **Result confirmation**: Admin confirms OR auto-accepts from trusted API source
-- **Team data**: Names, flags, group assignments, tier suggestions based on odds
+### AI Automation Flow (Claude Haiku 4.5)
+
+```
+Admin creates tournament + adds teams
+       │
+       ▼
+AIService: Tier Suggestion
+├── Fetches current odds from The Odds API
+├── Sends to Claude with tier definition rules
+├── Returns suggested tier (S/A/B/C) + initial price per team
+└── Admin reviews and confirms in admin panel
+       │
+       ▼
+AIService: Team Name Translation
+├── Takes English team names
+├── Batch-translates to all 6 languages (en, fa, ar, tr, es, fr)
+├── Returns JSONB: {"en": "Brazil", "fa": "برزیل", "ar": "البرازيل", ...}
+└── Stored in teams.name JSONB column
+       │
+       ▼
+Before each gameweek:
+AIService: Match Previews
+├── Takes match data (teams, odds, stage, history)
+├── Generates localized preview text for each match (all 6 languages)
+└── Stored and served to app
+
+On match result:
+AIService: Notification Content
+├── Takes match result + user's portfolio context
+├── Generates localized notification text
+│   e.g. "Your team Brazil won 2-0! +8 points earned"
+└── Sent via FCM in user's preferred language
+```
+
+### Automation Dashboard (Admin Panel)
+- **Job list**: All automation jobs with status (running/completed/failed), last run time
+- **Manual triggers**: Buttons to manually trigger any job (fetch matches, translate, suggest tiers, generate previews)
+- **Activity logs**: Full history from `automation_logs` table with input/output data
+- **Source badges**: "Auto" or "Manual" tags on matches/translations showing how they were created
+- **Feature toggles**: Enable/disable automation features via settings (e.g., `AUTO_SPORTS_ENABLED`, `AI_TRANSLATIONS_ENABLED`)
+
+### Automation Scope Summary
+| Job | Provider | Schedule | Admin Override |
+|-----|----------|----------|----------------|
+| Fetch upcoming matches | The Odds API | Every 6 hours | Manual trigger |
+| Poll live scores | The Odds API | Every 60s (during live matches) | Manual trigger |
+| Suggest team tiers | Claude + Odds API | On tournament setup | Manual trigger |
+| Translate team names | Claude Haiku 4.5 | On team creation | Manual trigger + edit |
+| Generate match previews | Claude Haiku 4.5 | Before each gameweek | Manual trigger |
+| Generate notification text | Claude Haiku 4.5 | On match result | — |
+| Auto price updates | Internal | On match result | — |
+| Auto scoring | Internal | On match result | — |
+| Market lock/unlock | Internal | 5 min before kickoff / after all matches finish | Manual override |
+| Leaderboard recalculation | Internal | After all gameweek matches complete | Manual trigger |
 
 ---
 
@@ -1107,8 +1289,10 @@ GitHub Actions (CI/CD)
 
 ### Environment Variables
 
+**Only infrastructure-level secrets are env vars.** All service API keys are stored in the DB `settings` table and managed via the admin panel.
+
 ```bash
-# Backend
+# Backend — Environment Variables (infra only)
 PORT=8080
 ENVIRONMENT=development|production
 LOG_LEVEL=debug|info|warn|error
@@ -1116,13 +1300,33 @@ DATABASE_URL=postgres://xexplus:xexplus@localhost:5432/xexplus?sslmode=disable
 REDIS_URL=redis://localhost:6379
 JWT_SECRET=shared-with-exchange-min-32-chars
 CORS_ORIGINS=http://localhost:3000
+
+# Admin — Environment Variables
+NEXT_PUBLIC_API_URL=http://localhost:8080/v1
+```
+
+**DB-backed settings (managed via admin panel → Settings page):**
+```
+ANTHROPIC_API_KEY=<Claude API key — same account as XEX Play>
+ODDS_API_KEY=<The Odds API key — same account as XEX Play>
 EXCHANGE_API_URL=https://api.xex.to
 EXCHANGE_SERVICE_KEY=<service-to-service secret>
-FCM_CREDENTIALS_FILE=/path/to/firebase-service-account.json
-SPORTS_DATA_API_KEY=<sports data API key>
+FCM_CREDENTIALS_JSON=<Firebase service account JSON>
+AUTO_SPORTS_ENABLED=true
+AI_TRANSLATIONS_ENABLED=true
+AI_TIER_SUGGESTIONS_ENABLED=true
+LIVE_SCORE_POLL_INTERVAL=60
+```
 
-# Admin
-NEXT_PUBLIC_API_URL=http://localhost:8080/v1
+### Settings Service Architecture
+The `SettingsService` loads settings from the `settings` table on startup and caches them in Redis. When a setting is updated via the admin panel, the cache is invalidated. Services that need API keys (AIService, SportsDataService, NotificationService) request them through SettingsService — never from env vars.
+
+```go
+// Example usage in AIService
+func (s *AIService) getClient() *anthropic.Client {
+    apiKey := s.settings.Get("ANTHROPIC_API_KEY")
+    return anthropic.NewClient(apiKey)
+}
 ```
 
 ---
